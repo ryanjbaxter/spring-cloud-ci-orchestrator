@@ -1,5 +1,7 @@
 # ci-release-orchestrator
 
+[![CI](https://github.com/ryanjbaxter/spring-cloud-ci-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/ryanjbaxter/spring-cloud-ci-orchestrator/actions/workflows/ci.yml)
+
 A local Spring Boot CLI that triggers cross-repo Spring Cloud GitHub Actions workflows — CI builds or docs deploys — in dependency order, computed from the projects' real `pom.xml` files rather than a hand-maintained list.
 
 ## What it does
@@ -23,6 +25,18 @@ Two things it can trigger (`--command`):
   1. `--token=<token>`
   2. `ORCHESTRATOR_GITHUB_TOKEN` environment variable
   3. `gh auth token` (so if you're already logged in with the GitHub CLI, no extra setup is needed)
+
+## Install
+
+Download the executable jar from the [latest release](https://github.com/ryanjbaxter/spring-cloud-ci-orchestrator/releases/latest):
+
+```bash
+gh release download --pattern '*.jar*' -R ryanjbaxter/spring-cloud-ci-orchestrator
+sha256sum -c ci-release-orchestrator-*.jar.sha256
+java -jar ci-release-orchestrator-*.jar --help
+```
+
+Only Java 25 is needed to run it — no Maven toolchain.
 
 ## Build
 

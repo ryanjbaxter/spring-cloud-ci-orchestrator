@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Wednesday 06:17 UTC. Off the top of the hour because GitHub delays scheduled runs
+    # under congestion, and off Monday so it doesn't pile onto the Dependabot run.
+    - cron: '17 6 * * 3'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Supersede stale PR runs; never cancel a main or scheduled run mid-flight.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build and test (Temurin 25)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          # CI never pushes - don't leave a usable token in .git/config.
+          persist-credentials: false
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          # The weekly run deliberately builds cold, so it genuinely re-resolves every
+          # dependency from Maven Central. A cached weekly build would prove very little.
+          cache: ${{ github.event_name != 'schedule' && 'maven' || '' }}
+
+      - name: Build and test
+        run: ./mvnw --batch-mode --no-transfer-progress verify
+
+      - name: Locate the executable jar
+        id: jar
+        run: |
+          shopt -s nullglob
+          jars=(target/*.jar)
+          if [ "${#jars[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one jar in target/, found ${#jars[@]}: ${jars[*]}"
+            ls -la target
+            exit 1
+          fi
+          echo "path=${jars[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the jar was repackaged into an executable fat jar
+        env:
+          JAR: ${{ steps.jar.outputs.path }}
+        run: |
+          # Capture, then match. `unzip -p ... | grep -q` dies under pipefail (which
+          # GitHub enables for `shell: bash`): grep exits early, unzip takes SIGPIPE.
+          manifest=$(unzip -p "$JAR" META-INF/MANIFEST.MF)
+          grep -q '^Main-Class: org.springframework.boot.loader.launch.JarLauncher' <<<"$manifest"
+          # Don't grep the full Start-Class value - JAR manifests hard-wrap at 72 bytes
+          # and this one splits mid-word as "...OrchestratorApp\n lication".
+          if [ ! -f "${JAR}.original" ]; then
+            echo "::error::no ${JAR}.original alongside the jar - spring-boot repackage did not run"
+            exit 1
+          fi
+
+      - name: Smoke test the CLI
+        env:
+          JAR: ${{ steps.jar.outputs.path }}
+        run: |
+          # --help returns from main() before SpringApplication.run, so this needs no
+          # token and no network, but still proves the fat jar boots under Java 25.
+          out=$(java -jar "$JAR" --help)
+          grep -q -- '--release-train-version' <<<"$out"
+          grep -q -- '--repo-type' <<<"$out"
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: surefire-reports
+          path: target/surefire-reports/
+          retention-days: 7
+          if-no-files-found: ignore

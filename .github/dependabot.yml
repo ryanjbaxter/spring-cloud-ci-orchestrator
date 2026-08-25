@@ -25,3 +25,21 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
+  # "/" is the required value for this ecosystem - it means .github/workflows,
+  # not a literal repo-root path.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      actions:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
