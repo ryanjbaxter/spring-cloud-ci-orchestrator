@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: "maven"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    groups:
+      # Keep the routine churn to a single PR per week; majors still come through
+      # on their own so they get looked at individually.
+      spring-boot:
+        patterns:
+          - "org.springframework.boot:*"
+        update-types:
+          - "minor"
+          - "patch"
+      minor-and-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "org.springframework.boot:*"
+        update-types:
+          - "minor"
+          - "patch"
