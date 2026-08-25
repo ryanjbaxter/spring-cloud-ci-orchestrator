@@ -1,0 +1,336 @@
+name: Orchestrate
+
+# While a run sits waiting for approval this title is the only thing visible in the Actions list,
+# so it has to answer "what am I about to approve?" without clicking in.
+run-name: >-
+  ${{ inputs.command }} ${{ inputs.release_train_version }} (${{ inputs.repo_type }})${{ inputs.dry_run && ' - DRY RUN' || ' - LIVE' }}
+
+on:
+  workflow_dispatch:
+    # workflow_dispatch allows at most 10 inputs. This is all 10 - adding one means removing one.
+    inputs:
+      release_train_version:
+        description: 'Release train, e.g. 2025.1.3 or 2025.1.3-INTERNAL-SNAPSHOT'
+        required: true
+        type: string
+      repo_type:
+        description: 'Target repos'
+        required: true
+        type: choice
+        options: [oss, commercial]
+      command:
+        description: 'What to trigger'
+        required: true
+        type: choice
+        options: [trigger-ci, deploy-docs]
+        default: trigger-ci
+      dry_run:
+        description: 'Print the plan and trigger NOTHING. Uncheck to really build.'
+        required: false
+        type: boolean
+        default: true
+      projects:
+        description: 'Comma-separated project names. Blank = every project on the train.'
+        required: false
+        type: string
+      resume_from:
+        description: 'Only (re)trigger this project and everything that depends on it.'
+        required: false
+        type: string
+      poll_interval_seconds:
+        description: 'Poll interval for in-flight runs.'
+        required: false
+        type: number
+        default: 60
+      max_retries:
+        description: 'Automatic rerun-failed-jobs retries per project. 0 disables.'
+        required: false
+        type: number
+        default: 1
+      orchestrator_version:
+        description: 'Orchestrator release tag, e.g. v0.1.0. Blank = latest release.'
+        required: false
+        type: string
+      timeout_minutes:
+        description: 'Hard cap on the orchestration step. Approval wait does not count.'
+        required: false
+        type: number
+        default: 350
+
+permissions:
+  # Only enough to download the release asset from THIS repo. Deliberately no actions: write -
+  # the default GITHUB_TOKEN cannot dispatch cross-repo or read the private releaser-config repo
+  # anyway. That work belongs to the PAT, and only the PAT.
+  contents: read
+
+concurrency:
+  # Two orchestrations of the same train against the same repo family must never interleave: they
+  # would dispatch the same workflows on the same branches and then each wait on whichever run the
+  # other started. Not keyed on `command` on purpose - a docs deploy and a CI run touch the same repos.
+  # cancel-in-progress MUST stay false; cancelling mid-orchestration orphans live builds.
+  group: orchestrate-${{ inputs.release_train_version }}-${{ inputs.repo_type }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # Hardcoded: the repo is spring-cloud-ci-orchestrator but the artifactId is
+  # ci-release-orchestrator, so github.event.repository.name is WRONG for the jar name.
+  ARTIFACT_ID: ci-release-orchestrator
+  # Preflighted below, so a PAT that cannot see it fails in seconds rather than surfacing 20
+  # minutes in disguised as branch-resolution failures.
+  CONFIG_REPO: spring-cloud/spring-cloud-release-commercial
+
+jobs:
+  orchestrate:
+    name: Orchestrate
+    runs-on: ubuntu-latest
+    # Required reviewers live here. The job does not start - and this environment's secrets are not
+    # readable - until someone approves. Approval wait does NOT consume job time.
+    environment: orchestration
+    timeout-minutes: 360   # hosted-runner ceiling; the step timeout below is the tunable one
+
+    steps:
+      - name: Validate inputs
+        env:
+          # Every input is read via env, never interpolated into the script body: ${{ }} is
+          # substituted textually before bash parses this, so inlining is an injection sink.
+          IN_TRAIN: ${{ inputs.release_train_version }}
+          IN_PROJECTS: ${{ inputs.projects }}
+          IN_RESUME_FROM: ${{ inputs.resume_from }}
+          IN_POLL: ${{ inputs.poll_interval_seconds }}
+          IN_RETRIES: ${{ inputs.max_retries }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$IN_TRAIN" =~ ^[0-9]{4}\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]]; then
+            echo "::error::release_train_version '$IN_TRAIN' does not look like a release train"
+            exit 1
+          fi
+          if [[ -n "${IN_PROJECTS// /}" && ! "${IN_PROJECTS// /}" =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
+            echo "::error::projects must be a comma-separated list of project names"
+            exit 1
+          fi
+          if [[ -n "${IN_RESUME_FROM// /}" && ! "${IN_RESUME_FROM// /}" =~ ^[a-z0-9-]+$ ]]; then
+            echo "::error::resume_from must be a single project name"
+            exit 1
+          fi
+          [[ "$IN_POLL"    =~ ^[0-9]+$ ]] || { echo "::error::poll_interval_seconds must be a number"; exit 1; }
+          [[ "$IN_RETRIES" =~ ^[0-9]+$ ]] || { echo "::error::max_retries must be a number"; exit 1; }
+
+      - name: Resolve the orchestrator release
+        id: rel
+        env:
+          # This repo only, and scoped to this step so it can never reach the JVM later.
+          GH_TOKEN: ${{ github.token }}
+          IN_VERSION: ${{ inputs.orchestrator_version }}
+        run: |
+          set -euo pipefail
+          version="${IN_VERSION//[[:space:]]/}"
+          if [ -z "$version" ]; then
+            # `gh release view` with no tag = the latest published, non-draft, non-prerelease release.
+            tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          else
+            tag="v${version#v}"
+          fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(M|RC)[0-9]+)?$ ]]; then
+            echo "::error::'$tag' is not a valid orchestrator release tag"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Orchestrator::Running $tag"
+
+      - name: Download and verify the orchestrator jar
+        id: jar
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          dir="$RUNNER_TEMP/orchestrator"
+          mkdir -p "$dir"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "${ARTIFACT_ID}-*.jar" \
+            --pattern "${ARTIFACT_ID}-*.jar.sha256" \
+            --dir "$dir"
+          cd "$dir"
+          shopt -s nullglob
+          # *.jar does not match *.jar.sha256 - a glob must match to end-of-name.
+          jars=("${ARTIFACT_ID}"-*.jar)
+          if [ "${#jars[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one jar in release $TAG, got: ${jars[*]}"
+            exit 1
+          fi
+          jar="${jars[0]}"
+          if [ ! -f "$jar.sha256" ]; then
+            echo "::error::release $TAG has no $jar.sha256 - refusing to run an unverified jar"
+            exit 1
+          fi
+          # The checksum file records the bare filename (release.yml cds into target/ before
+          # running sha256sum), so this must run from inside the download directory.
+          sha256sum -c "$jar.sha256"
+          echo "path=$dir/$jar" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '25'
+          # No `cache: maven` - nothing here builds, it just runs a fat jar.
+
+      - name: Preflight the orchestration PAT
+        env:
+          # Scoped to THIS step. See the orchestration step for why GH_TOKEN must never be set at
+          # job or workflow level in this file.
+          GH_TOKEN: ${{ secrets.ORCHESTRATOR_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::secret ORCHESTRATOR_GITHUB_TOKEN is not set on the 'orchestration' environment."
+            echo "::error::The default GITHUB_TOKEN cannot be used: the releaser config repo is private"
+            echo "::error::and cross-repo workflow dispatch is required."
+            exit 1
+          fi
+          # GitHub returns 404 (not 403) for a private repo you cannot see, so a missing-scope PAT
+          # otherwise looks exactly like a missing config file, 20 minutes into a run.
+          if ! gh api "repos/${CONFIG_REPO}" --silent 2>/dev/null; then
+            echo "::error::ORCHESTRATOR_GITHUB_TOKEN cannot read ${CONFIG_REPO}."
+            echo "::error::Needs a fine-grained PAT with Contents: read + Actions: read and write on the"
+            echo "::error::spring-cloud repos (classic equivalent: 'repo'), SSO-authorized for the org."
+            exit 1
+          fi
+          gh api "repos/${CONFIG_REPO}/branches/jenkins-releaser-config" --silent
+          echo "PAT authenticates as $(gh api user --jq .login) and can read ${CONFIG_REPO}"
+
+      - name: Orchestrate
+        id: orchestrate
+        timeout-minutes: ${{ fromJSON(inputs.timeout_minutes != '' && inputs.timeout_minutes || '350') }}
+        env:
+          # The tool reads this env var directly. NEVER pass --token on the command line: the
+          # rendered "Run" header echoes the script with expressions already substituted, and argv
+          # is visible to every process on the runner.
+          ORCHESTRATOR_GITHUB_TOKEN: ${{ secrets.ORCHESTRATOR_GITHUB_TOKEN }}
+          JAR: ${{ steps.jar.outputs.path }}
+          IN_COMMAND: ${{ inputs.command }}
+          IN_TRAIN: ${{ inputs.release_train_version }}
+          IN_REPO_TYPE: ${{ inputs.repo_type }}
+          IN_PROJECTS: ${{ inputs.projects }}
+          IN_RESUME_FROM: ${{ inputs.resume_from }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          IN_POLL: ${{ inputs.poll_interval_seconds }}
+          IN_RETRIES: ${{ inputs.max_retries }}
+          # A multi-hour log is unreadable with the default Boot pattern, and this makes the
+          # summary block extractable. Boot's relaxed binding picks both up from the environment.
+          SPRING_MAIN_BANNER_MODE: 'off'
+          LOGGING_PATTERN_CONSOLE: '%d{HH:mm:ss} %msg%n'
+        run: |
+          # No `set -e`: the jar exits 1 on any non-SUCCESS project and we still want the log
+          # flushed and the summary step to render.
+          set -uo pipefail
+
+          args=(
+            "--command=$IN_COMMAND"
+            "--release-train-version=$IN_TRAIN"
+            "--repo-type=$IN_REPO_TYPE"
+          )
+          # `if` blocks rather than `[ ... ] && args+=(...)`: a trailing false test would become the
+          # script's exit status and fail the step for the crime of leaving an input blank.
+          if [ -n "${IN_PROJECTS// /}" ]; then args+=("--projects=${IN_PROJECTS// /}"); fi
+          # An empty --resume-from= is NOT the same as omitting it. OrchestratorArgs.firstValue has
+          # no blank guard, so it yields "", which is non-null and then fails the
+          # "not a buildable project" check. (--projects does have an isBlank guard; don't rely on
+          # the asymmetry.)
+          if [ -n "${IN_RESUME_FROM// /}" ]; then args+=("--resume-from=${IN_RESUME_FROM// /}"); fi
+          if [ -n "${IN_POLL// /}" ]; then args+=("--poll-interval-seconds=${IN_POLL// /}"); fi
+          if [ -n "${IN_RETRIES// /}" ]; then args+=("--max-retries=${IN_RETRIES// /}"); fi
+          # --dry-run is a PRESENCE flag (OrchestratorArgs uses containsOption), so --dry-run=false
+          # would STILL be a dry run and live runs would be impossible. Append it or don't.
+          if [ "$IN_DRY_RUN" = "true" ]; then args+=(--dry-run); fi
+
+          echo "java -jar $(basename "$JAR") ${args[*]}"
+
+          # Guard against the CLI's third token fallback, `gh auth token`. If GH_TOKEN/GITHUB_TOKEN
+          # ever leaks into the job environment (someone adds a convenience job-level `env:` - it
+          # happens), gh would hand the JVM the job's GITHUB_TOKEN, which 404s on the private config
+          # repo and 403s on cross-repo dispatch, halfway through a live run.
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            java -jar "$JAR" "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/orchestrate.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Job summary
+        if: always()
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          IN_COMMAND: ${{ inputs.command }}
+          IN_TRAIN: ${{ inputs.release_train_version }}
+          IN_REPO_TYPE: ${{ inputs.repo_type }}
+          IN_PROJECTS: ${{ inputs.projects }}
+          IN_RESUME_FROM: ${{ inputs.resume_from }}
+          IN_DRY_RUN: ${{ inputs.dry_run }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/orchestrate.log"
+          {
+            echo "## ${IN_COMMAND} ${IN_TRAIN} (${IN_REPO_TYPE})"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| orchestrator | \`${TAG:-unresolved}\` |"
+            echo "| dry run | \`${IN_DRY_RUN}\` |"
+            echo "| projects | \`${IN_PROJECTS:-all}\` |"
+            echo "| resume from | \`${IN_RESUME_FROM:-none}\` |"
+            echo "| job status | \`${JOB_STATUS}\` |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ! -f "$log" ]; then
+            echo "_The orchestrator never started - see the failing step above._" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if grep -q '=== Summary ===' "$log"; then
+            {
+              echo "### Per-project outcome"
+              echo
+              echo '```'
+              awk '/=== Summary ===/{f=1} f' "$log" | sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2} //'
+              echo '```'
+              echo
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            first_bad=$(awk '/=== Summary ===/{f=1;next} f && /->/ && $0 !~ /-> SUCCESS$/ {print $(NF-2); exit}' "$log")
+            if [ -n "${first_bad:-}" ]; then
+              {
+                echo "### Retry"
+                echo
+                echo "Re-run with \`resume_from: ${first_bad}\` to rebuild that project and everything"
+                echo "that transitively depends on it, leaving the rest alone."
+                echo
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+
+          if [ "$JOB_STATUS" != "success" ]; then
+            {
+              echo "### Builds already dispatched"
+              echo
+              echo "**Cancelling or timing out this job does not cancel anything it already dispatched.**"
+              echo "Those workflow runs keep going in their own repos and will finish unattended."
+              echo "Check or cancel them there:"
+              echo
+              echo '```'
+              grep -iE 'dispatch' "$log" | sed -E 's/^[0-9]{2}:[0-9]{2}:[0-9]{2} //' || echo '(none)'
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload the run log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: orchestrate-log
+          path: ${{ runner.temp }}/orchestrate.log
+          retention-days: 30
+          if-no-files-found: ignore
