@@ -64,6 +64,14 @@ public final class Usage {
                                                   Set to 0 to disable.
               --help, -h                          Print this message and exit.
 
+            Exit status:
+
+              0  Every project in the plan built successfully - or --dry-run was used, which
+                 dispatches nothing and so has nothing to fail.
+              1  Anything else: a bad argument, a GitHub API error, or at least one project that
+                 failed, errored, was skipped because a prerequisite failed, or was skipped
+                 because its branch could not be resolved.
+
             Examples:
 
               Preview the build order for a commercial internal-snapshot train without triggering anything:

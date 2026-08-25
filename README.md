@@ -71,6 +71,17 @@ java -jar ci-release-orchestrator.jar --release-train-version=<version> --repo-t
 | `--max-retries` | no | `1` | Automatic retries via GitHub's `rerun-failed-jobs` for a run that doesn't finish successfully. `0` disables retries. |
 | `--help` / `-h` | no | — | Print usage and exit (skips starting the app entirely). |
 
+### Exit status
+
+| Code | Meaning |
+|---|---|
+| `0` | Every project in the plan built successfully — or `--dry-run` was used, which dispatches nothing and so has nothing to fail. |
+| `1` | A bad argument, a GitHub API error, or at least one project that failed, errored, was skipped because a prerequisite failed, or was skipped because its branch could not be resolved. |
+
+A project skipped because its branch could not be resolved counts as a failure: you asked for it and
+it never built, however well the rest of the train went. This makes the tool usable as a CI step —
+see [`.github/workflows/orchestrate.yml`](.github/workflows/orchestrate.yml).
+
 ### Examples
 
 Preview the build order for a commercial internal-snapshot train without triggering anything:

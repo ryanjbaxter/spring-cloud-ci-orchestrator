@@ -45,8 +45,10 @@ public class OrchestrationCommand {
      *                       to dispatch against the same branch the graph was derived from (CI), or
      *                       a constant like {@code node -> "docs-build"} to dispatch elsewhere while
      *                       still using the real graph for ordering (docs deploys).
+     * @return whether everything asked for actually succeeded - the caller turns this into the
+     *         process exit code. A dry run reports success: nothing was dispatched, so nothing failed.
      */
-    public void run(GitHub gitHub, String token, OrchestratorArgs args, Map<String, String> versions,
+    public boolean run(GitHub gitHub, String token, OrchestratorArgs args, Map<String, String> versions,
             Set<String> requested, boolean commercial, Function<ProjectNode, String> dispatchBranch,
             List<String> workflowCandidates) throws IOException {
 
@@ -89,7 +91,7 @@ public class OrchestrationCommand {
 
         if (args.dryRun()) {
             log.info("Dry run - not triggering anything.");
-            return;
+            return true;
         }
 
         Set<String> attempted = levels.stream().flatMap(List::stream).collect(Collectors.toCollection(LinkedHashSet::new));
@@ -100,6 +102,7 @@ public class OrchestrationCommand {
         Map<String, BuildOutcome> outcomes = coordinator.run(gitHub, levels, prerequisitesOf, dispatchNodes, log::info);
 
         printSummary(attempted, outcomes, branchFailures);
+        return allSucceeded(attempted, outcomes, branchFailures);
     }
 
     private void printPlan(Map<String, ProjectNode> nodes, List<List<String>> levels) {
@@ -110,6 +113,19 @@ public class OrchestrationCommand {
                     .collect(Collectors.joining(", "));
             log.info("  Level {}: {}", i, level);
         }
+    }
+
+    /**
+     * Mirrors {@link #printSummary} exactly, so the exit code can never disagree with the table that
+     * was just printed. {@code getOrDefault(..., ERROR)} matches it too: a project that never recorded
+     * an outcome counts as failed rather than silently passing. An unresolved branch is a failure as
+     * well - a project you asked for that never built is not a success, however well the rest went.
+     */
+    static boolean allSucceeded(Set<String> attempted, Map<String, BuildOutcome> outcomes,
+            Map<String, String> branchFailures) {
+        return branchFailures.isEmpty()
+                && attempted.stream()
+                        .allMatch(project -> outcomes.getOrDefault(project, BuildOutcome.ERROR) == BuildOutcome.SUCCESS);
     }
 
     private void printSummary(Set<String> attempted, Map<String, BuildOutcome> outcomes,

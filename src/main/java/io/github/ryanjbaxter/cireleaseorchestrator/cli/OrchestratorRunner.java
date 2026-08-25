@@ -36,7 +36,10 @@ public class OrchestratorRunner implements CommandLineRunner {
     @Override
     public void run(String... rawArgs) {
         try {
-            execute(OrchestratorArgs.parse(new DefaultApplicationArguments(rawArgs)));
+            if (!execute(OrchestratorArgs.parse(new DefaultApplicationArguments(rawArgs)))) {
+                log.error("One or more projects did not succeed - see the summary above.");
+                System.exit(1);
+            }
         } catch (IllegalArgumentException | IllegalStateException e) {
             log.error(e.getMessage());
             System.exit(1);
@@ -46,7 +49,7 @@ public class OrchestratorRunner implements CommandLineRunner {
         }
     }
 
-    private void execute(OrchestratorArgs orchestratorArgs) throws IOException {
+    private boolean execute(OrchestratorArgs orchestratorArgs) throws IOException {
         String token = new GitHubTokenResolver().resolve(orchestratorArgs.token());
         GitHub gitHub = new GitHubClientFactory().create(token);
         boolean commercial = orchestratorArgs.repoType() == OrchestratorArgs.RepoType.COMMERCIAL;
@@ -69,11 +72,11 @@ public class OrchestratorRunner implements CommandLineRunner {
         GraphResolver graphResolver = new GraphResolver(new BranchResolver(new PomFetcher()), new PomFetcher());
         OrchestrationCommand command = new OrchestrationCommand(graphResolver);
 
-        switch (orchestratorArgs.command()) {
+        return switch (orchestratorArgs.command()) {
             case TRIGGER_CI -> command.run(gitHub, token, orchestratorArgs, versions, requested, commercial,
                     ProjectNode::branch, WorkflowTrigger.CI_WORKFLOW_CANDIDATES);
             case DEPLOY_DOCS -> command.run(gitHub, token, orchestratorArgs, versions, requested, commercial,
                     node -> DOCS_BUILD_BRANCH, WorkflowTrigger.DOCS_WORKFLOW_CANDIDATES);
-        }
+        };
     }
 }
