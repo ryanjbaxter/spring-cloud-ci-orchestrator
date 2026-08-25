@@ -1,5 +1,12 @@
 name: Release
 
+# Shown as the run title in the Actions list, so runs are distinguishable at a glance.
+# This is evaluated before any step executes, so it cannot know a version derived from
+# the pom - hence the fallback. The resolved version is emitted as a ::notice::
+# annotation by the resolve step below, which does show up on the run page.
+run-name: >-
+  Release ${{ inputs.version || '(version from pom)' }}${{ inputs.dry_run && ' - dry run' || '' }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -135,7 +142,9 @@ jobs:
             echo "next_snapshot=$next-SNAPSHOT"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Releasing $version (from $source_note) as $tag; next development version $next-SNAPSHOT"
+          # ::notice:: renders on the run's summary page, which is the only way the
+          # auto-derived version becomes visible in the UI.
+          echo "::notice title=Release $tag::Releasing $version (from $source_note); next development version $next-SNAPSHOT"
 
       - name: Preflight - tag and release must not already exist
         env:
