@@ -12,7 +12,7 @@ on:
         required: false
         type: string
       dry_run:
-        description: 'Build and validate everything, but push and publish nothing'
+        description: 'Dry run, build and validate everything, but push and publish nothing'
         required: false
         type: boolean
         default: false
