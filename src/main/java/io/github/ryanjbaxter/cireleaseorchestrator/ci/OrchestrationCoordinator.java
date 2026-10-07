@@ -106,7 +106,8 @@ public class OrchestrationCoordinator {
                     + (retries > 0 ? " after " + retries + " retry/retries" : ""));
             return conclusion == GHWorkflowRun.Conclusion.SUCCESS ? BuildOutcome.SUCCESS : BuildOutcome.FAILURE;
         } catch (IOException e) {
-            onEvent.accept(name + ": error - " + e.getMessage());
+            onEvent.accept(name + ": error - " + e
+                    + (e.getCause() != null ? " (caused by " + e.getCause() + ")" : ""));
             return BuildOutcome.ERROR;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
