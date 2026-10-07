@@ -48,7 +48,7 @@ on:
         type: number
         default: 1
       orchestrator_version:
-        description: 'Orchestrator release tag, e.g. v0.1.0. Blank = latest release.'
+        description: 'Orchestrator release tag, e.g. v0.1.0, or ref:<branch|tag|sha> to build from source. Blank = latest release.'
         required: false
         type: string
       timeout_minutes:
@@ -128,6 +128,20 @@ jobs:
         run: |
           set -euo pipefail
           version="${IN_VERSION//[[:space:]]/}"
+          if [[ "$version" == ref:* ]]; then
+            # Build-from-source escape hatch for testing unreleased changes. Skips the release
+            # download and checksum: there is no published asset to verify.
+            ref="${version#ref:}"
+            if [[ ! "$ref" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+              echo "::error::'$ref' is not a valid branch, tag or sha"
+              exit 1
+            fi
+            echo "ref=$ref" >> "$GITHUB_OUTPUT"
+            echo "tag=ref:$ref" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Orchestrator::Building from source at '$ref' - NOT a verified release jar"
+            exit 0
+          fi
+          echo "ref=" >> "$GITHUB_OUTPUT"
           if [ -z "$version" ]; then
             # `gh release view` with no tag = the latest published, non-draft, non-prerelease release.
             tag=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
@@ -143,6 +157,7 @@ jobs:
 
       - name: Download and verify the orchestrator jar
         id: jar
+        if: steps.rel.outputs.ref == ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.rel.outputs.tag }}
@@ -177,7 +192,30 @@ jobs:
         with:
           distribution: temurin
           java-version: '25'
-          # No `cache: maven` - nothing here builds, it just runs a fat jar.
+          # No `cache: maven` - normally this just runs a fat jar; only ref: builds compile anything.
+
+      - name: Check out the orchestrator source
+        if: steps.rel.outputs.ref != ''
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.rel.outputs.ref }}
+          path: orchestrator-src
+          persist-credentials: false
+
+      - name: Build the orchestrator jar from source
+        id: build
+        if: steps.rel.outputs.ref != ''
+        working-directory: orchestrator-src
+        run: |
+          set -euo pipefail
+          ./mvnw --batch-mode --no-transfer-progress package -DskipTests
+          shopt -s nullglob
+          jars=(target/*.jar)
+          if [ "${#jars[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one jar in target/, found ${#jars[@]}: ${jars[*]}"
+            exit 1
+          fi
+          echo "path=$PWD/${jars[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Preflight the orchestration PAT
         env:
@@ -211,7 +249,7 @@ jobs:
           # rendered "Run" header echoes the script with expressions already substituted, and argv
           # is visible to every process on the runner.
           ORCHESTRATOR_GITHUB_TOKEN: ${{ secrets.ORCHESTRATOR_GITHUB_TOKEN }}
-          JAR: ${{ steps.jar.outputs.path }}
+          JAR: ${{ steps.jar.outputs.path || steps.build.outputs.path }}
           IN_COMMAND: ${{ inputs.command }}
           IN_TRAIN: ${{ inputs.release_train_version }}
           IN_REPO_TYPE: ${{ inputs.repo_type }}
