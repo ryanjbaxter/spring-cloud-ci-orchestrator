@@ -63,6 +63,17 @@ class ReleaserConfigClientTest {
     }
 
     @Test
+    void withoutNonRepoKeysDropsSpringBootAndSpringVault() {
+        Map<String, String> versions = client.parse("""
+                releaser.fixed-versions[spring-boot]=4.0.8
+                releaser.fixed-versions[spring-vault]=4.0.1
+                releaser.fixed-versions[spring-cloud-vault]=5.0.2
+                """);
+
+        assertThat(client.withoutNonRepoKeys(versions)).containsOnlyKeys("spring-cloud-vault");
+    }
+
+    @Test
     void parseIgnoresUnrelatedLines() {
         String content = """
                 # a comment

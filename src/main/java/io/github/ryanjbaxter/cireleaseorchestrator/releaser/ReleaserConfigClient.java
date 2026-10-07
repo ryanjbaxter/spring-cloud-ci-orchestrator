@@ -22,9 +22,10 @@ public class ReleaserConfigClient {
     public static final String RELEASE_CONFIG_REPO = "spring-cloud/spring-cloud-release-commercial";
     public static final String RELEASE_CONFIG_BRANCH = "jenkins-releaser-config";
 
-    // Present in the properties file so every project can pick up the Spring Boot version it
-    // should build against, but it isn't a Spring Cloud repository and nothing is triggered for it.
-    private static final Set<String> NON_REPO_KEYS = Set.of("spring-boot");
+    // Present in the properties file so every project can pick up the version it should build
+    // against (spring-boot), or because the project is built and released elsewhere (spring-vault),
+    // but none of these is a repository this orchestrator triggers.
+    private static final Set<String> NON_REPO_KEYS = Set.of("spring-boot", "spring-vault");
 
     private static final Pattern ENTRY_PATTERN =
             Pattern.compile("^releaser\\.fixed-versions\\[([^\\]]+)\\]=(.+?)\\r?$");
@@ -72,7 +73,7 @@ public class ReleaserConfigClient {
 
     /**
      * Fetches and parses the properties file for a release train, with non-repository keys
-     * (currently just {@code spring-boot}) filtered out.
+     * ({@code spring-boot}, {@code spring-vault}) filtered out.
      */
     public Map<String, String> fetchProjectVersions(GitHub gitHub, String releaseTrainVersion) throws IOException {
         String fileName = fileNameFor(releaseTrainVersion);
@@ -81,6 +82,10 @@ public class ReleaserConfigClient {
         if (versions.isEmpty()) {
             throw new IllegalStateException(fileName + " contains no releaser.fixed-versions[...] entries.");
         }
+        return withoutNonRepoKeys(versions);
+    }
+
+    Map<String, String> withoutNonRepoKeys(Map<String, String> versions) {
         Map<String, String> filtered = new LinkedHashMap<>(versions);
         NON_REPO_KEYS.forEach(filtered::remove);
         return filtered;
