@@ -41,14 +41,23 @@ public class PomFetcher {
             if (!path.equals("pom.xml") && !path.endsWith("/pom.xml")) {
                 continue;
             }
-            // Skip fixture/sample poms under test resources - they aren't real project modules
-            // and can carry unrelated version properties that would pollute the graph.
-            if (path.contains("/src/test/") || path.contains("/src/it/")) {
+            if (isExcluded(path)) {
                 continue;
             }
             GHContent content = repo.getFileContent(path, branchName);
             poms.add(PomXml.parse(content.getContent()));
         }
         return poms;
+    }
+
+    /**
+     * Fixture and sample poms aren't real project modules and can carry unrelated version
+     * properties that would pollute the graph - e.g. spring-cloud-function's sample modules
+     * reference spring-cloud-stream, which closes a cycle with stream's binders referencing function.
+     */
+    static boolean isExcluded(String pomPath) {
+        return pomPath.contains("/src/test/") || pomPath.contains("/src/it/")
+                || pomPath.startsWith("samples/") || pomPath.contains("/samples/")
+                || pomPath.contains("-samples/");
     }
 }
