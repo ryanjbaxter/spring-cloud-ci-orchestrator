@@ -28,6 +28,7 @@ public class WorkflowTrigger {
     public static final List<String> CI_WORKFLOW_CANDIDATES = List.of("ci-release.yml", "ci.yml", "ci.yaml");
     public static final List<String> DOCS_WORKFLOW_CANDIDATES = List.of("deploy-docs.yml");
 
+    private static final String WORKFLOWS_DIR = ".github/workflows/";
     private static final String API_BASE = "https://api.github.com";
 
     private final String token;
@@ -44,6 +45,10 @@ public class WorkflowTrigger {
         for (String candidate : workflowCandidates) {
             GHWorkflow workflow;
             try {
+                // The workflow registry is repo-wide: a file that only exists on some other branch
+                // still resolves via getWorkflow, and dispatching it here would 422. Require the
+                // file at the branch being dispatched.
+                repo.getFileContent(WORKFLOWS_DIR + candidate, branch);
                 workflow = repo.getWorkflow(candidate);
             } catch (GHFileNotFoundException e) {
                 continue;
